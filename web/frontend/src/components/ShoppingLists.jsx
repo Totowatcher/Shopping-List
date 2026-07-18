@@ -19,6 +19,9 @@ export default function ShoppingLists({ authFetch }) {
 
   const [editItem, setEditItem] = useState(null);
   const [storeModal, setStoreModal] = useState(null); // {mode:"add"} or {mode:"rename", store}
+  const [dragId, setDragId] = useState(null);
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
 
   const swallow = (e) => {
     if (!isSessionExpiredError(e)) {
@@ -154,6 +157,54 @@ export default function ShoppingLists({ authFetch }) {
     } catch (e) {
       swallow(e);
     }
+  };
+
+  const startDrag = (e, item) => {
+    e.preventDefault();
+    setDragId(item.id);
+
+    const onMove = (ev) => {
+      const el = document
+        .elementFromPoint(ev.clientX, ev.clientY)
+        ?.closest("[data-item-id]");
+      if (!el) return;
+      const overId = Number(el.dataset.itemId);
+      if (!overId || overId === item.id) return;
+      setItems((cur) => {
+        const from = cur.findIndex((i) => i.id === item.id);
+        const to = cur.findIndex((i) => i.id === overId);
+        if (from < 0 || to < 0 || cur[to].checked) return cur;
+        const next = [...cur];
+        const [moved] = next.splice(from, 1);
+        next.splice(to, 0, moved);
+        return next;
+      });
+    };
+
+    const onEnd = async () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onEnd);
+      window.removeEventListener("pointercancel", onEnd);
+      setDragId(null);
+      const ordered = itemsRef.current;
+      const ids = [
+        ...ordered.filter((i) => !i.checked),
+        ...ordered.filter((i) => i.checked),
+      ].map((i) => i.id);
+      try {
+        await authFetch(apiUrl(`/stores/${item.store_id}/reorder`), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ item_ids: ids }),
+        });
+      } catch (e2) {
+        swallow(e2);
+      }
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onEnd);
+    window.addEventListener("pointercancel", onEnd);
   };
 
   const clearChecked = async () => {
@@ -308,6 +359,8 @@ export default function ShoppingLists({ authFetch }) {
                 <ItemRow
                   key={item.id}
                   item={item}
+                  dragging={item.id === dragId}
+                  onDragStart={startDrag}
                   onToggle={toggleItem}
                   onDelete={deleteItem}
                   onEdit={() => setEditItem({ ...item })}
@@ -432,10 +485,22 @@ export default function ShoppingLists({ authFetch }) {
   );
 }
 
-function ItemRow({ item, onToggle, onDelete, onEdit }) {
+function ItemRow({ item, dragging, onDragStart, onToggle, onDelete, onEdit }) {
   const meta = [item.quantity, item.note].filter(Boolean);
   return (
-    <li className={`item-row ${item.checked ? "checked" : ""}`}>
+    <li
+      className={`item-row ${item.checked ? "checked" : ""} ${dragging ? "dragging" : ""}`}
+      data-item-id={item.id}
+    >
+      {onDragStart && (
+        <span
+          className="item-handle"
+          onPointerDown={(e) => onDragStart(e, item)}
+          aria-label="Drag to reorder"
+        >
+          &#8801;
+        </span>
+      )}
       <button
         className="item-check"
         onClick={() => onToggle(item)}

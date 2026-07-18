@@ -50,6 +50,7 @@ def init_db() -> None:
                 quantity   TEXT NOT NULL DEFAULT '',
                 note       TEXT NOT NULL DEFAULT '',
                 checked    INTEGER NOT NULL DEFAULT 0,
+                sort_order INTEGER NOT NULL DEFAULT 0,
                 created_by TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 checked_at TEXT
@@ -58,6 +59,16 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_items_store ON items(store_id);
             """
         )
+        _migrate_items_sort_order(conn)
+
+
+def _migrate_items_sort_order(conn: sqlite3.Connection) -> None:
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(items)")}
+    if "sort_order" not in cols:
+        conn.execute(
+            "ALTER TABLE items ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0"
+        )
+        conn.execute("UPDATE items SET sort_order = id")
 
 
 def _now() -> str:
@@ -176,7 +187,7 @@ def list_items(store_id: int) -> List[Dict[str, Any]]:
             SELECT id, store_id, name, quantity, note, checked, created_by, created_at, checked_at
             FROM items
             WHERE store_id = ?
-            ORDER BY checked ASC, id DESC
+            ORDER BY checked ASC, sort_order ASC, id ASC
             """,
             (store_id,),
         )
@@ -198,14 +209,27 @@ def create_item(
     store_id: int, name: str, quantity: str, note: str, created_by: str
 ) -> int:
     with get_db() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(sort_order), 0) + 1 AS next FROM items WHERE store_id = ?",
+            (store_id,),
+        ).fetchone()
         cur = conn.execute(
             """
-            INSERT INTO items (store_id, name, quantity, note, created_by, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO items (store_id, name, quantity, note, sort_order, created_by, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (store_id, name, quantity, note, created_by, _now()),
+            (store_id, name, quantity, note, int(row["next"]), created_by, _now()),
         )
         return int(cur.lastrowid)
+
+
+def reorder_items(store_id: int, item_ids: List[int]) -> None:
+    with get_db() as conn:
+        for pos, item_id in enumerate(item_ids, start=1):
+            conn.execute(
+                "UPDATE items SET sort_order = ? WHERE id = ? AND store_id = ?",
+                (pos, item_id, store_id),
+            )
 
 
 def update_item(

@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import logging
 from contextlib import asynccontextmanager
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -89,6 +89,10 @@ class UpdateItemRequest(BaseModel):
     quantity: Optional[str] = None
     note: Optional[str] = None
     checked: Optional[bool] = None
+
+
+class ReorderRequest(BaseModel):
+    item_ids: List[int]
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +217,16 @@ async def patch_item(
 async def remove_item(item_id: int, user: Dict[str, Any] = Depends(require_user)):
     if not db.delete_item(item_id):
         raise HTTPException(status_code=404, detail="Item not found")
+    return {"ok": True}
+
+
+@app.post("/api/stores/{store_id}/reorder")
+async def reorder(
+    store_id: int, body: ReorderRequest, user: Dict[str, Any] = Depends(require_user)
+):
+    if not db.get_store(store_id):
+        raise HTTPException(status_code=404, detail="Store not found")
+    db.reorder_items(store_id, body.item_ids)
     return {"ok": True}
 
 

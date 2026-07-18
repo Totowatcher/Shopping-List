@@ -344,9 +344,26 @@ select {
 .item-row {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 12px 16px;
+  gap: 9px;
+  padding: 6px 14px;
   border-bottom: 1px solid var(--line);
+}
+
+.item-row.dragging {
+  background: var(--green-50);
+  box-shadow: inset 0 0 0 1.5px var(--green-600);
+}
+
+.item-handle {
+  flex: none;
+  color: var(--ink-faint);
+  font-size: 17px;
+  line-height: 1;
+  padding: 6px 2px;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .item-row:last-child {
@@ -359,9 +376,9 @@ select {
 
 .item-check {
   flex: none;
-  width: 26px;
-  height: 26px;
-  border-radius: 8px;
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
   border: 2px solid var(--ink-faint);
   background: #fff;
   cursor: pointer;
@@ -386,8 +403,9 @@ select {
 }
 
 .item-name {
-  font-size: 15px;
+  font-size: 14.5px;
   font-weight: 500;
+  line-height: 1.3;
   overflow-wrap: break-word;
 }
 
@@ -398,9 +416,10 @@ select {
 }
 
 .item-meta {
-  font-size: 12.5px;
+  font-size: 12px;
   color: var(--ink-soft);
-  margin-top: 2px;
+  margin-top: 1px;
+  line-height: 1.25;
 }
 
 .item-row.checked .item-meta {
@@ -421,9 +440,9 @@ select {
   border: none;
   background: none;
   color: var(--ink-faint);
-  font-size: 18px;
+  font-size: 17px;
   cursor: pointer;
-  padding: 6px;
+  padding: 4px 6px;
   border-radius: 8px;
   line-height: 1;
 }
@@ -446,7 +465,7 @@ select {
 }
 
 .done-divider {
-  padding: 8px 16px;
+  padding: 5px 16px;
   font-size: 12px;
   font-weight: 700;
   text-transform: uppercase;
@@ -651,7 +670,8 @@ select {
   }
 
   .item-row {
-    padding: 12px 12px;
+    padding: 5px 10px;
+    gap: 8px;
   }
 
   .nav-user {
