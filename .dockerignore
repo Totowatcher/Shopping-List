@@ -1,0 +1,9 @@
+.git
+.sl-local
+**/__pycache__
+**/.venv
+**/*.pyc
+web/backend/shopping_list.db*
+web/frontend/node_modules
+web/frontend/dist
+**/.env
