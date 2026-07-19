@@ -86,6 +86,25 @@ export default function ShoppingLists({ authFetch }) {
     if (activeStoreId) await loadItems(activeStoreId);
   }, [loadStores, loadItems, activeStoreId]);
 
+  // Keep the list in sync with other devices: refetch when the app comes back
+  // to the foreground, and poll while it stays visible. Paused during a drag
+  // or while a modal is open so a refetch doesn't disturb what the user is doing.
+  useEffect(() => {
+    if (dragId !== null || editItem !== null || storeModal !== null) return;
+
+    const refreshIfVisible = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    document.addEventListener("visibilitychange", refreshIfVisible);
+    window.addEventListener("focus", refreshIfVisible);
+    const timer = setInterval(refreshIfVisible, 12000);
+    return () => {
+      document.removeEventListener("visibilitychange", refreshIfVisible);
+      window.removeEventListener("focus", refreshIfVisible);
+      clearInterval(timer);
+    };
+  }, [refresh, dragId, editItem, storeModal]);
+
   const activeStore = stores?.find((s) => s.id === activeStoreId) || null;
 
   // ------------------------------------------------------------------ items
