@@ -6,7 +6,7 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -78,10 +78,15 @@ class StoreRequest(BaseModel):
     name: str
 
 
+class CategoryRequest(BaseModel):
+    name: str
+
+
 class CreateItemRequest(BaseModel):
     name: str
     quantity: str = ""
     note: str = ""
+    category_id: Optional[int] = None
 
 
 class UpdateItemRequest(BaseModel):
@@ -89,10 +94,17 @@ class UpdateItemRequest(BaseModel):
     quantity: Optional[str] = None
     note: Optional[str] = None
     checked: Optional[bool] = None
+    category_id: Optional[int] = None
+    # When True, category_id was explicitly sent (including null to clear)
+    clear_category: bool = False
 
 
 class ReorderRequest(BaseModel):
     item_ids: List[int]
+
+
+class ReorderCategoriesRequest(BaseModel):
+    category_ids: List[int]
 
 
 # ---------------------------------------------------------------------------
@@ -169,15 +181,118 @@ async def remove_store(store_id: int, user: Dict[str, Any] = Depends(require_use
 
 
 # ---------------------------------------------------------------------------
+# Categories
+# ---------------------------------------------------------------------------
+
+@app.get("/api/stores/{store_id}/categories")
+async def get_categories(store_id: int, user: Dict[str, Any] = Depends(require_user)):
+    if not db.get_store(store_id):
+        raise HTTPException(status_code=404, detail="Store not found")
+    return {"categories": db.list_categories(store_id)}
+
+
+@app.post("/api/stores/{store_id}/categories", status_code=201)
+async def add_category(
+    store_id: int, body: CategoryRequest, user: Dict[str, Any] = Depends(require_user)
+):
+    if not db.get_store(store_id):
+        raise HTTPException(status_code=404, detail="Store not found")
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Category name required")
+    try:
+        cat_id = db.create_category(store_id, name)
+    except Exception:
+        raise HTTPException(status_code=409, detail=f'A category named "{name}" already exists')
+    return {"id": cat_id, "name": name, "store_id": store_id}
+
+
+@app.put("/api/categories/{category_id}")
+async def update_category(
+    category_id: int, body: CategoryRequest, user: Dict[str, Any] = Depends(require_user)
+):
+    cat = db.get_category(category_id)
+    if not cat:
+        raise HTTPException(status_code=404, detail="Category not found")
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Category name required")
+    try:
+        db.rename_category(category_id, name)
+    except Exception:
+        raise HTTPException(status_code=409, detail=f'A category named "{name}" already exists')
+    return {"id": category_id, "name": name}
+
+
+@app.delete("/api/categories/{category_id}")
+async def remove_category(
+    category_id: int, user: Dict[str, Any] = Depends(require_user)
+):
+    if not db.delete_category(category_id):
+        raise HTTPException(status_code=404, detail="Category not found")
+    return {"ok": True}
+
+
+@app.post("/api/stores/{store_id}/categories/reorder")
+async def reorder_categories(
+    store_id: int,
+    body: ReorderCategoriesRequest,
+    user: Dict[str, Any] = Depends(require_user),
+):
+    if not db.get_store(store_id):
+        raise HTTPException(status_code=404, detail="Store not found")
+    db.reorder_categories(store_id, body.category_ids)
+    return {"ok": True}
+
+
+@app.post("/api/stores/{store_id}/categories/grocery-defaults")
+async def add_grocery_defaults(
+    store_id: int, user: Dict[str, Any] = Depends(require_user)
+):
+    if not db.get_store(store_id):
+        raise HTTPException(status_code=404, detail="Store not found")
+    if db.list_categories(store_id):
+        raise HTTPException(
+            status_code=409,
+            detail="This store already has categories",
+        )
+    return {"categories": db.seed_grocery_categories(store_id)}
+
+
+@app.get("/api/stores/{store_id}/suggest-category")
+async def suggest_category(
+    store_id: int,
+    name: str = Query(""),
+    user: Dict[str, Any] = Depends(require_user),
+):
+    if not db.get_store(store_id):
+        raise HTTPException(status_code=404, detail="Store not found")
+    suggested = db.suggest_category(store_id, name)
+    return {"category_id": suggested}
+
+
+# ---------------------------------------------------------------------------
 # Items
 # ---------------------------------------------------------------------------
+
+def _validate_category_for_store(store_id: int, category_id: Optional[int]) -> None:
+    if category_id is None:
+        return
+    cat = db.get_category(category_id)
+    if not cat or cat["store_id"] != store_id:
+        raise HTTPException(status_code=422, detail="Invalid category for this store")
+
 
 @app.get("/api/stores/{store_id}/items")
 async def get_items(store_id: int, user: Dict[str, Any] = Depends(require_user)):
     store = db.get_store(store_id)
     if not store:
         raise HTTPException(status_code=404, detail="Store not found")
-    return {"store": store, "items": db.list_items(store_id)}
+    return {
+        "store": store,
+        "items": db.list_items(store_id),
+        "categories": db.list_categories(store_id),
+    }
 
 
 @app.post("/api/stores/{store_id}/items", status_code=201)
@@ -189,8 +304,14 @@ async def add_item(
     name = body.name.strip()
     if not name:
         raise HTTPException(status_code=422, detail="Item name required")
+    _validate_category_for_store(store_id, body.category_id)
     item_id = db.create_item(
-        store_id, name, body.quantity.strip(), body.note.strip(), user["username"]
+        store_id,
+        name,
+        body.quantity.strip(),
+        body.note.strip(),
+        user["username"],
+        category_id=body.category_id,
     )
     return {"id": item_id}
 
@@ -199,16 +320,26 @@ async def add_item(
 async def patch_item(
     item_id: int, body: UpdateItemRequest, user: Dict[str, Any] = Depends(require_user)
 ):
-    if not db.get_item(item_id):
+    item = db.get_item(item_id)
+    if not item:
         raise HTTPException(status_code=404, detail="Item not found")
     if body.name is not None and not body.name.strip():
         raise HTTPException(status_code=422, detail="Item name cannot be empty")
+
+    # Detect whether category_id was in the JSON (Pydantic v2: model_fields_set)
+    fields_set = getattr(body, "model_fields_set", None) or getattr(body, "__fields_set__", set())
+    category_arg: Any = ...
+    if "category_id" in fields_set or body.clear_category:
+        _validate_category_for_store(item["store_id"], body.category_id)
+        category_arg = body.category_id
+
     db.update_item(
         item_id,
         name=body.name.strip() if body.name is not None else None,
         quantity=body.quantity.strip() if body.quantity is not None else None,
         note=body.note.strip() if body.note is not None else None,
         checked=body.checked,
+        category_id=category_arg,
     )
     return {"ok": True}
 

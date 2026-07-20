@@ -6,6 +6,98 @@ from typing import Any, Dict, List, Optional
 
 from .config import DATABASE_PATH
 
+# Keyword -> family label. Matched against store category names (partial, case-insensitive).
+GROCERY_KEYWORD_HINTS: Dict[str, str] = {
+    # Pharmacy
+    "omeprazole": "pharmacy",
+    "ibuprofen": "pharmacy",
+    "advil": "pharmacy",
+    "tylenol": "pharmacy",
+    "aspirin": "pharmacy",
+    "band-aid": "pharmacy",
+    "bandaid": "pharmacy",
+    "vitamin": "pharmacy",
+    "prescription": "pharmacy",
+    "allergy": "pharmacy",
+    "cough": "pharmacy",
+    "toothpaste": "pharmacy",
+    "shampoo": "pharmacy",
+    "deodorant": "pharmacy",
+    # Produce
+    "banana": "fruit",
+    "apple": "fruit",
+    "orange": "fruit",
+    "grape": "fruit",
+    "berry": "fruit",
+    "strawberry": "fruit",
+    "blueberry": "fruit",
+    "lettuce": "vegetable",
+    "spinach": "vegetable",
+    "tomato": "vegetable",
+    "onion": "vegetable",
+    "potato": "vegetable",
+    "carrot": "vegetable",
+    "broccoli": "vegetable",
+    "cucumber": "vegetable",
+    "avocado": "vegetable",
+    "celery": "vegetable",
+    "pepper": "vegetable",
+    "salad": "vegetable",
+    "fruit": "fruit",
+    "vegetable": "vegetable",
+    # Frozen
+    "ice cream": "frozen",
+    "frozen": "frozen",
+    "pizza": "frozen",
+    "popsicle": "frozen",
+    "waffle": "frozen",
+    # Refrigerated
+    "milk": "refrigerat",
+    "yogurt": "refrigerat",
+    "butter": "refrigerat",
+    "cheese": "refrigerat",
+    "cream": "refrigerat",
+    "egg": "refrigerat",
+    "eggs": "refrigerat",
+    "juice": "refrigerat",
+    "deli": "refrigerat",
+    "bacon": "refrigerat",
+    "sausage": "refrigerat",
+    "ham": "refrigerat",
+    "chicken": "refrigerat",
+    "beef": "refrigerat",
+    "turkey": "refrigerat",
+    "fish": "refrigerat",
+    "salmon": "refrigerat",
+    # Non-frozen / pantry
+    "bread": "non-frozen",
+    "cereal": "non-frozen",
+    "pasta": "non-frozen",
+    "rice": "non-frozen",
+    "flour": "non-frozen",
+    "sugar": "non-frozen",
+    "oil": "non-frozen",
+    "sauce": "non-frozen",
+    "soup": "non-frozen",
+    "cracker": "non-frozen",
+    "chip": "non-frozen",
+    "coffee": "non-frozen",
+    "tea": "non-frozen",
+    "bean": "non-frozen",
+    "can": "non-frozen",
+    "paper towel": "non-frozen",
+    "toilet paper": "non-frozen",
+}
+
+GROCERY_DEFAULT_CATEGORIES = [
+    "Pharmacy",
+    "Fruits & Vegetables",
+    "Frozen food",
+    "Refrigerated food",
+    "Non-frozen food",
+    "Other",
+]
+
 
 def _connect() -> sqlite3.Connection:
     Path(DATABASE_PATH).parent.mkdir(parents=True, exist_ok=True)
@@ -43,23 +135,34 @@ def init_db() -> None:
                 created_at TEXT NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS items (
+            CREATE TABLE IF NOT EXISTS categories (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 store_id   INTEGER NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
                 name       TEXT NOT NULL,
-                quantity   TEXT NOT NULL DEFAULT '',
-                note       TEXT NOT NULL DEFAULT '',
-                checked    INTEGER NOT NULL DEFAULT 0,
                 sort_order INTEGER NOT NULL DEFAULT 0,
-                created_by TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL,
-                checked_at TEXT
+                UNIQUE(store_id, name)
+            );
+
+            CREATE TABLE IF NOT EXISTS items (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                store_id    INTEGER NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+                name        TEXT NOT NULL,
+                quantity    TEXT NOT NULL DEFAULT '',
+                note        TEXT NOT NULL DEFAULT '',
+                checked     INTEGER NOT NULL DEFAULT 0,
+                sort_order  INTEGER NOT NULL DEFAULT 0,
+                category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
+                created_by  TEXT NOT NULL DEFAULT '',
+                created_at  TEXT NOT NULL,
+                checked_at  TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_items_store ON items(store_id);
+            CREATE INDEX IF NOT EXISTS idx_categories_store ON categories(store_id);
             """
         )
         _migrate_items_sort_order(conn)
+        _migrate_items_category_id(conn)
 
 
 def _migrate_items_sort_order(conn: sqlite3.Connection) -> None:
@@ -69,6 +172,15 @@ def _migrate_items_sort_order(conn: sqlite3.Connection) -> None:
             "ALTER TABLE items ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0"
         )
         conn.execute("UPDATE items SET sort_order = id")
+
+
+def _migrate_items_category_id(conn: sqlite3.Connection) -> None:
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(items)")}
+    if "category_id" not in cols:
+        conn.execute(
+            "ALTER TABLE items ADD COLUMN category_id INTEGER "
+            "REFERENCES categories(id) ON DELETE SET NULL"
+        )
 
 
 def _now() -> str:
@@ -177,6 +289,149 @@ def delete_store(store_id: int) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Categories
+# ---------------------------------------------------------------------------
+
+def list_categories(store_id: int) -> List[Dict[str, Any]]:
+    with get_db() as conn:
+        cur = conn.execute(
+            """
+            SELECT id, store_id, name, sort_order
+            FROM categories
+            WHERE store_id = ?
+            ORDER BY sort_order ASC, id ASC
+            """,
+            (store_id,),
+        )
+        return [dict(row) for row in cur]
+
+
+def get_category(category_id: int) -> Optional[Dict[str, Any]]:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT id, store_id, name, sort_order FROM categories WHERE id = ?",
+            (category_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def create_category(store_id: int, name: str) -> int:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(sort_order), 0) + 1 AS next FROM categories WHERE store_id = ?",
+            (store_id,),
+        ).fetchone()
+        cur = conn.execute(
+            "INSERT INTO categories (store_id, name, sort_order) VALUES (?, ?, ?)",
+            (store_id, name, int(row["next"])),
+        )
+        return int(cur.lastrowid)
+
+
+def rename_category(category_id: int, name: str) -> int:
+    with get_db() as conn:
+        cur = conn.execute(
+            "UPDATE categories SET name = ? WHERE id = ?", (name, category_id)
+        )
+        return cur.rowcount
+
+
+def delete_category(category_id: int) -> int:
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE items SET category_id = NULL WHERE category_id = ?",
+            (category_id,),
+        )
+        cur = conn.execute("DELETE FROM categories WHERE id = ?", (category_id,))
+        return cur.rowcount
+
+
+def reorder_categories(store_id: int, category_ids: List[int]) -> None:
+    with get_db() as conn:
+        for pos, cat_id in enumerate(category_ids, start=1):
+            conn.execute(
+                "UPDATE categories SET sort_order = ? WHERE id = ? AND store_id = ?",
+                (pos, cat_id, store_id),
+            )
+
+
+def seed_grocery_categories(store_id: int) -> List[Dict[str, Any]]:
+    """Insert grocery defaults if the store has no categories yet."""
+    existing = list_categories(store_id)
+    if existing:
+        return existing
+    with get_db() as conn:
+        for pos, name in enumerate(GROCERY_DEFAULT_CATEGORIES, start=1):
+            conn.execute(
+                "INSERT INTO categories (store_id, name, sort_order) VALUES (?, ?, ?)",
+                (store_id, name, pos),
+            )
+    return list_categories(store_id)
+
+
+def suggest_category(store_id: int, item_name: str) -> Optional[int]:
+    """Return a category_id suggestion, or None."""
+    name = (item_name or "").strip()
+    if not name:
+        return None
+    categories = list_categories(store_id)
+    if not categories:
+        return None
+
+    # 1) Prior assignment for the same item name at this store
+    with get_db() as conn:
+        row = conn.execute(
+            """
+            SELECT category_id FROM items
+            WHERE store_id = ?
+              AND category_id IS NOT NULL
+              AND LOWER(name) = LOWER(?)
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (store_id, name),
+        ).fetchone()
+        if row and row["category_id"]:
+            return int(row["category_id"])
+
+    # 2) Keyword map vs category names
+    lower_name = name.lower()
+    family: Optional[str] = None
+    # Prefer longer keyword matches first
+    for keyword in sorted(GROCERY_KEYWORD_HINTS.keys(), key=len, reverse=True):
+        if keyword in lower_name:
+            family = GROCERY_KEYWORD_HINTS[keyword]
+            break
+    if not family:
+        return None
+
+    for cat in categories:
+        cat_lower = cat["name"].lower()
+        if family in cat_lower:
+            return int(cat["id"])
+        # Broader aliases for grocery default names
+        if family == "fruit" and ("fruit" in cat_lower or "produce" in cat_lower or "vegetable" in cat_lower):
+            return int(cat["id"])
+        if family == "vegetable" and ("vegetable" in cat_lower or "produce" in cat_lower or "fruit" in cat_lower):
+            return int(cat["id"])
+        if family == "pharmacy" and ("pharm" in cat_lower or "health" in cat_lower or "personal" in cat_lower):
+            return int(cat["id"])
+        if family == "frozen" and "frozen" in cat_lower:
+            return int(cat["id"])
+        if family == "refrigerat" and ("refrigerat" in cat_lower or "dairy" in cat_lower or "meat" in cat_lower):
+            return int(cat["id"])
+        if family == "non-frozen" and (
+            "non-frozen" in cat_lower
+            or "pantry" in cat_lower
+            or "grocery" in cat_lower
+            or "other" in cat_lower
+        ):
+            return int(cat["id"])
+
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Items
 # ---------------------------------------------------------------------------
 
@@ -184,7 +439,8 @@ def list_items(store_id: int) -> List[Dict[str, Any]]:
     with get_db() as conn:
         cur = conn.execute(
             """
-            SELECT id, store_id, name, quantity, note, checked, created_by, created_at, checked_at
+            SELECT id, store_id, name, quantity, note, checked, category_id,
+                   created_by, created_at, checked_at
             FROM items
             WHERE store_id = ?
             ORDER BY checked ASC, sort_order ASC, id ASC
@@ -206,7 +462,12 @@ def get_item(item_id: int) -> Optional[Dict[str, Any]]:
 
 
 def create_item(
-    store_id: int, name: str, quantity: str, note: str, created_by: str
+    store_id: int,
+    name: str,
+    quantity: str,
+    note: str,
+    created_by: str,
+    category_id: Optional[int] = None,
 ) -> int:
     with get_db() as conn:
         row = conn.execute(
@@ -215,10 +476,21 @@ def create_item(
         ).fetchone()
         cur = conn.execute(
             """
-            INSERT INTO items (store_id, name, quantity, note, sort_order, created_by, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO items (
+                store_id, name, quantity, note, sort_order, category_id, created_by, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (store_id, name, quantity, note, int(row["next"]), created_by, _now()),
+            (
+                store_id,
+                name,
+                quantity,
+                note,
+                int(row["next"]),
+                category_id,
+                created_by,
+                _now(),
+            ),
         )
         return int(cur.lastrowid)
 
@@ -238,6 +510,7 @@ def update_item(
     quantity: Optional[str] = None,
     note: Optional[str] = None,
     checked: Optional[bool] = None,
+    category_id: Any = ...,
 ) -> int:
     sets: List[str] = []
     params: List[Any] = []
@@ -255,6 +528,10 @@ def update_item(
         params.append(1 if checked else 0)
         sets.append("checked_at = ?")
         params.append(_now() if checked else None)
+    # Use ... sentinel so callers can explicitly clear category_id to NULL
+    if category_id is not ...:
+        sets.append("category_id = ?")
+        params.append(category_id)
     if not sets:
         return 0
     params.append(item_id)
