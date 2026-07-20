@@ -149,7 +149,8 @@ export default function ShoppingLists({ authFetch }) {
   const openItems = useMemo(() => items.filter((i) => !i.checked), [items]);
   const doneItems = useMemo(() => items.filter((i) => i.checked), [items]);
 
-  // Group open items by category sort order; uncategorized last
+  // Group open items by category sort order; uncategorized last.
+  // While dragging, also show empty category headers as drop targets.
   const openGroups = useMemo(() => {
     const byCat = new Map();
     for (const item of openItems) {
@@ -159,19 +160,18 @@ export default function ShoppingLists({ authFetch }) {
     }
     const groups = [];
     for (const cat of categories) {
-      const list = byCat.get(cat.id);
-      if (list && list.length > 0) {
+      const list = byCat.get(cat.id) || [];
+      if (list.length > 0 || dragId !== null) {
         groups.push({ key: cat.id, label: cat.name, items: list });
       }
       byCat.delete(cat.id);
     }
-    // Uncategorized + any orphaned category_ids
     const uncategorized = byCat.get(null) || [];
     byCat.delete(null);
     for (const [, list] of byCat) {
       uncategorized.push(...list);
     }
-    if (uncategorized.length > 0) {
+    if (uncategorized.length > 0 || (dragId !== null && categories.length > 0)) {
       groups.push({
         key: null,
         label: categories.length > 0 ? "Uncategorized" : null,
@@ -179,7 +179,7 @@ export default function ShoppingLists({ authFetch }) {
       });
     }
     return groups;
-  }, [openItems, categories]);
+  }, [openItems, categories, dragId]);
 
   // ------------------------------------------------------------------ items
 
@@ -259,26 +259,63 @@ export default function ShoppingLists({ authFetch }) {
   const startDrag = (e, item) => {
     e.preventDefault();
     setDragId(item.id);
+    const originalCategoryId = item.category_id ?? null;
+
+    const applyDraft = (updater) => {
+      setItems((cur) => {
+        const next = updater(cur);
+        if (next === cur) return cur;
+        itemsRef.current = next;
+        return next;
+      });
+    };
 
     const onMove = (ev) => {
-      const el = document
-        .elementFromPoint(ev.clientX, ev.clientY)
-        ?.closest("[data-item-id]");
+      const hit = document.elementFromPoint(ev.clientX, ev.clientY);
+      if (!hit) return;
+
+      // Drop onto a category header → move into that category
+      const header = hit.closest("[data-category-drop]");
+      if (header) {
+        const raw = header.getAttribute("data-category-drop");
+        const targetCategoryId =
+          raw === "" || raw === "null" ? null : Number(raw);
+        applyDraft((cur) => {
+          const from = cur.findIndex((i) => i.id === item.id);
+          if (from < 0) return cur;
+          const current = cur[from];
+          if ((current.category_id ?? null) === targetCategoryId) return cur;
+          const next = [...cur];
+          const [moved] = next.splice(from, 1);
+          moved.category_id = targetCategoryId;
+          // Place after the last open item already in that category
+          let insertAt = next.findIndex((i) => i.checked);
+          if (insertAt < 0) insertAt = next.length;
+          let lastSame = -1;
+          for (let i = 0; i < insertAt; i++) {
+            if ((next[i].category_id ?? null) === targetCategoryId) lastSame = i;
+          }
+          if (lastSame >= 0) insertAt = lastSame + 1;
+          next.splice(insertAt, 0, moved);
+          return next;
+        });
+        return;
+      }
+
+      const el = hit.closest("[data-item-id]");
       if (!el) return;
       const overId = Number(el.dataset.itemId);
       if (!overId || overId === item.id) return;
-      setItems((cur) => {
+      applyDraft((cur) => {
         const from = cur.findIndex((i) => i.id === item.id);
         const to = cur.findIndex((i) => i.id === overId);
         if (from < 0 || to < 0 || cur[to].checked) return cur;
-        // When dropping onto an item in another category, adopt that category
+        // Adopt the hovered item's category (cross-category drag)
+        const targetCategoryId = cur[to].category_id ?? null;
         const next = [...cur];
         const [moved] = next.splice(from, 1);
-        const over = next[to > from ? to - 1 : to];
-        if (over && !over.checked) {
-          moved.category_id = over.category_id;
-        }
-        next.splice(to, 0, moved);
+        moved.category_id = targetCategoryId;
+        next.splice(from < to ? to - 1 : to, 0, moved);
         return next;
       });
     };
@@ -290,16 +327,17 @@ export default function ShoppingLists({ authFetch }) {
       setDragId(null);
       const ordered = itemsRef.current;
       const moved = ordered.find((i) => i.id === item.id);
+      const newCategoryId = moved?.category_id ?? null;
       const ids = [
         ...ordered.filter((i) => !i.checked),
         ...ordered.filter((i) => i.checked),
       ].map((i) => i.id);
       try {
-        if (moved && moved.category_id !== item.category_id) {
+        if (moved && newCategoryId !== originalCategoryId) {
           await authFetch(apiUrl(`/items/${item.id}`), {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ category_id: moved.category_id ?? null }),
+            body: JSON.stringify({ category_id: newCategoryId }),
           });
         }
         await authFetch(apiUrl(`/stores/${item.store_id}/reorder`), {
@@ -309,6 +347,7 @@ export default function ShoppingLists({ authFetch }) {
         });
       } catch (e2) {
         swallow(e2);
+        await refresh();
       }
     };
 
@@ -658,17 +697,24 @@ export default function ShoppingLists({ authFetch }) {
               {openGroups.map((group) => (
                 <React.Fragment key={group.key ?? "none"}>
                   {group.label && (
-                    <li className="category-header">{group.label}</li>
+                    <li
+                      className="category-header"
+                      data-category-drop={
+                        group.key === null ? "null" : String(group.key)
+                      }
+                    >
+                      {group.label}
+                    </li>
                   )}
-                  {group.items.map((item) => (
+                  {group.items.map((rowItem) => (
                     <ItemRow
-                      key={item.id}
-                      item={item}
-                      dragging={item.id === dragId}
+                      key={rowItem.id}
+                      item={rowItem}
+                      dragging={rowItem.id === dragId}
                       onDragStart={startDrag}
                       onToggle={toggleItem}
                       onDelete={deleteItem}
-                      onEdit={() => setEditItem({ ...item })}
+                      onEdit={() => setEditItem({ ...rowItem })}
                     />
                   ))}
                 </React.Fragment>

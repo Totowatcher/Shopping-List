@@ -495,6 +495,10 @@ select {
   z-index: 1;
 }
 
+.category-header[data-category-drop] {
+  min-height: 28px;
+}
+
 /* ---------------- Buttons ---------------- */
 
 .btn {
