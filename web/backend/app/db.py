@@ -208,24 +208,29 @@ def _migrate_groups(conn: sqlite3.Connection) -> None:
 
     store_cols = {r[1] for r in conn.execute("PRAGMA table_info(stores)")}
     if "group_id" not in store_cols:
+        # Rebuild stores for UNIQUE(group_id, name). Keep categories/items intact:
+        # foreign_keys OFF + rename (not drop) so ON DELETE CASCADE cannot wipe
+        # child category rows.
         conn.execute("PRAGMA foreign_keys=OFF")
         conn.executescript(
             f"""
-            CREATE TABLE stores_new (
+            ALTER TABLE stores RENAME TO stores_old;
+            CREATE TABLE stores (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 group_id   INTEGER NOT NULL REFERENCES groups(id),
                 name       TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 UNIQUE(group_id, name)
             );
-            INSERT INTO stores_new (id, group_id, name, created_at)
-                SELECT id, {default_gid}, name, created_at FROM stores;
-            DROP TABLE stores;
-            ALTER TABLE stores_new RENAME TO stores;
+            INSERT INTO stores (id, group_id, name, created_at)
+                SELECT id, {default_gid}, name, created_at FROM stores_old;
+            DROP TABLE stores_old;
             CREATE INDEX IF NOT EXISTS idx_stores_group ON stores(group_id);
             """
         )
         conn.execute("PRAGMA foreign_keys=ON")
+        # Defensive: if any categories were still lost, leave stores usable;
+        # grocery defaults can be re-added from the Edit store UI.
     else:
         # Legacy rows without a group (shouldn't happen after first migrate)
         conn.execute(
