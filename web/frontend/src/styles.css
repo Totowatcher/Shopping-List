@@ -673,25 +673,72 @@ select {
 
 /* ---------------- Admin ---------------- */
 
-.admin-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 14px;
-}
-
-.admin-table th {
-  text-align: left;
-  padding: 10px 16px;
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+.admin-hint {
+  margin: 0;
+  padding: 0 16px 12px;
+  font-size: 13px;
   color: var(--ink-soft);
-  border-bottom: 2px solid var(--line);
+  line-height: 1.4;
 }
 
-.admin-table td {
-  padding: 10px 16px;
+.admin-card-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.admin-card {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
   border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+
+.admin-card-main {
+  flex: 1 1 160px;
+  min-width: 0;
+}
+
+.admin-card-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.admin-card-meta {
+  font-size: 13px;
+  color: var(--ink-soft);
+  margin-top: 6px;
+}
+
+.admin-group-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.admin-group-label .admin-select {
+  max-width: 100%;
+}
+
+.admin-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex: 0 1 auto;
+}
+
+.admin-card-actions .btn {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .role-pill {
@@ -725,7 +772,9 @@ select {
   border-radius: 9px;
   outline: none;
   width: 150px;
+  max-width: 100%;
   background: #fff;
+  box-sizing: border-box;
 }
 
 .admin-input:focus {
@@ -737,6 +786,7 @@ select {
   border: 1px solid var(--line);
   border-radius: 9px;
   background: #fff;
+  max-width: 100%;
 }
 
 .form-error {
@@ -792,13 +842,31 @@ select {
     display: none;
   }
 
-  .admin-table th:nth-child(1),
-  .admin-table td:nth-child(1) {
-    padding-left: 12px;
+  .admin-card {
+    flex-direction: column;
+    align-items: stretch;
+    padding: 12px;
   }
 
-  .admin-input {
-    flex: 1 1 130px;
-    width: auto;
+  .admin-card-actions {
+    width: 100%;
+  }
+
+  .admin-card-actions .btn {
+    flex: 1 1 calc(50% - 4px);
+  }
+
+  .admin-form {
+    padding: 12px;
+  }
+
+  .admin-input,
+  .admin-select {
+    flex: 1 1 100%;
+    width: 100%;
+  }
+
+  .admin-form .btn {
+    width: 100%;
   }
 }

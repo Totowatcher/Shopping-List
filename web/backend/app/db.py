@@ -122,17 +122,25 @@ def init_db() -> None:
     with get_db() as conn:
         conn.executescript(
             """
+            CREATE TABLE IF NOT EXISTS groups (
+                id   INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS users (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
                 username      TEXT UNIQUE NOT NULL,
                 password_hash TEXT NOT NULL,
-                role          TEXT NOT NULL CHECK (role IN ('admin', 'user'))
+                role          TEXT NOT NULL CHECK (role IN ('admin', 'user')),
+                group_id      INTEGER REFERENCES groups(id)
             );
 
             CREATE TABLE IF NOT EXISTS stores (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                name       TEXT UNIQUE NOT NULL,
-                created_at TEXT NOT NULL
+                group_id   INTEGER NOT NULL REFERENCES groups(id),
+                name       TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(group_id, name)
             );
 
             CREATE TABLE IF NOT EXISTS categories (
@@ -163,6 +171,66 @@ def init_db() -> None:
         )
         _migrate_items_sort_order(conn)
         _migrate_items_category_id(conn)
+        _migrate_groups(conn)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_stores_group ON stores(group_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_users_group ON users(group_id)"
+        )
+
+
+def _migrate_groups(conn: sqlite3.Connection) -> None:
+    """Add groups and scope users/stores to a group. Existing data → 'Household'."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS groups (
+            id   INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL
+        )
+        """
+    )
+    row = conn.execute("SELECT id FROM groups WHERE name = 'Household'").fetchone()
+    if row:
+        default_gid = int(row["id"])
+    else:
+        cur = conn.execute("INSERT INTO groups (name) VALUES ('Household')")
+        default_gid = int(cur.lastrowid)
+
+    user_cols = {r[1] for r in conn.execute("PRAGMA table_info(users)")}
+    if "group_id" not in user_cols:
+        conn.execute(
+            "ALTER TABLE users ADD COLUMN group_id INTEGER REFERENCES groups(id)"
+        )
+    conn.execute(
+        "UPDATE users SET group_id = ? WHERE group_id IS NULL", (default_gid,)
+    )
+
+    store_cols = {r[1] for r in conn.execute("PRAGMA table_info(stores)")}
+    if "group_id" not in store_cols:
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.executescript(
+            f"""
+            CREATE TABLE stores_new (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id   INTEGER NOT NULL REFERENCES groups(id),
+                name       TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(group_id, name)
+            );
+            INSERT INTO stores_new (id, group_id, name, created_at)
+                SELECT id, {default_gid}, name, created_at FROM stores;
+            DROP TABLE stores;
+            ALTER TABLE stores_new RENAME TO stores;
+            CREATE INDEX IF NOT EXISTS idx_stores_group ON stores(group_id);
+            """
+        )
+        conn.execute("PRAGMA foreign_keys=ON")
+    else:
+        # Legacy rows without a group (shouldn't happen after first migrate)
+        conn.execute(
+            "UPDATE stores SET group_id = ? WHERE group_id IS NULL", (default_gid,)
+        )
 
 
 def _migrate_items_sort_order(conn: sqlite3.Connection) -> None:
@@ -188,6 +256,72 @@ def _now() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Groups
+# ---------------------------------------------------------------------------
+
+def list_groups() -> List[Dict[str, Any]]:
+    with get_db() as conn:
+        cur = conn.execute(
+            """
+            SELECT g.id, g.name,
+                   (SELECT COUNT(*) FROM users u WHERE u.group_id = g.id) AS user_count,
+                   (SELECT COUNT(*) FROM stores s WHERE s.group_id = g.id) AS store_count
+            FROM groups g
+            ORDER BY g.name COLLATE NOCASE
+            """
+        )
+        return [dict(row) for row in cur]
+
+
+def get_group(group_id: int) -> Optional[Dict[str, Any]]:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT id, name FROM groups WHERE id = ?", (group_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def create_group(name: str) -> int:
+    with get_db() as conn:
+        cur = conn.execute("INSERT INTO groups (name) VALUES (?)", (name,))
+        return int(cur.lastrowid)
+
+
+def rename_group(group_id: int, name: str) -> int:
+    with get_db() as conn:
+        cur = conn.execute(
+            "UPDATE groups SET name = ? WHERE id = ?", (name, group_id)
+        )
+        return cur.rowcount
+
+
+def delete_group(group_id: int) -> None:
+    with get_db() as conn:
+        users_n = conn.execute(
+            "SELECT COUNT(*) AS n FROM users WHERE group_id = ?", (group_id,)
+        ).fetchone()["n"]
+        stores_n = conn.execute(
+            "SELECT COUNT(*) AS n FROM stores WHERE group_id = ?", (group_id,)
+        ).fetchone()["n"]
+        if users_n or stores_n:
+            raise ValueError(
+                "Cannot delete a group that still has users or stores"
+            )
+        conn.execute("DELETE FROM groups WHERE id = ?", (group_id,))
+
+
+def default_group_id() -> int:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT id FROM groups ORDER BY id ASC LIMIT 1"
+        ).fetchone()
+        if row:
+            return int(row["id"])
+        cur = conn.execute("INSERT INTO groups (name) VALUES ('Household')")
+        return int(cur.lastrowid)
+
+
+# ---------------------------------------------------------------------------
 # Users
 # ---------------------------------------------------------------------------
 
@@ -200,17 +334,29 @@ def count_users() -> int:
 def get_user_by_username(username: str) -> Optional[Dict[str, Any]]:
     with get_db() as conn:
         row = conn.execute(
-            "SELECT id, username, password_hash, role FROM users WHERE username = ?",
+            """
+            SELECT u.id, u.username, u.password_hash, u.role, u.group_id,
+                   g.name AS group_name
+            FROM users u
+            LEFT JOIN groups g ON g.id = u.group_id
+            WHERE u.username = ?
+            """,
             (username,),
         ).fetchone()
         return dict(row) if row else None
 
 
-def insert_user(username: str, password_hash: str, role: str) -> int:
+def insert_user(
+    username: str,
+    password_hash: str,
+    role: str,
+    group_id: Optional[int] = None,
+) -> int:
+    gid = group_id if group_id is not None else default_group_id()
     with get_db() as conn:
         cur = conn.execute(
-            "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
-            (username, password_hash, role),
+            "INSERT INTO users (username, password_hash, role, group_id) VALUES (?, ?, ?, ?)",
+            (username, password_hash, role, gid),
         )
         return int(cur.lastrowid)
 
@@ -218,7 +364,12 @@ def insert_user(username: str, password_hash: str, role: str) -> int:
 def list_users() -> List[Dict[str, Any]]:
     with get_db() as conn:
         cur = conn.execute(
-            "SELECT id, username, role FROM users ORDER BY username COLLATE NOCASE"
+            """
+            SELECT u.id, u.username, u.role, u.group_id, g.name AS group_name
+            FROM users u
+            LEFT JOIN groups g ON g.id = u.group_id
+            ORDER BY g.name COLLATE NOCASE, u.username COLLATE NOCASE
+            """
         )
         return [dict(row) for row in cur]
 
@@ -238,22 +389,33 @@ def update_user_password(username: str, password_hash: str) -> int:
         return cur.rowcount
 
 
+def set_user_group(username: str, group_id: int) -> int:
+    with get_db() as conn:
+        cur = conn.execute(
+            "UPDATE users SET group_id = ? WHERE username = ?",
+            (group_id, username),
+        )
+        return cur.rowcount
+
+
 # ---------------------------------------------------------------------------
 # Stores
 # ---------------------------------------------------------------------------
 
-def list_stores() -> List[Dict[str, Any]]:
+def list_stores(group_id: int) -> List[Dict[str, Any]]:
     with get_db() as conn:
         cur = conn.execute(
             """
-            SELECT s.id, s.name,
+            SELECT s.id, s.name, s.group_id,
                    COALESCE(SUM(CASE WHEN i.checked = 0 THEN 1 ELSE 0 END), 0) AS open_count,
                    COUNT(i.id) AS item_count
             FROM stores s
             LEFT JOIN items i ON i.store_id = s.id
+            WHERE s.group_id = ?
             GROUP BY s.id
             ORDER BY s.name COLLATE NOCASE
-            """
+            """,
+            (group_id,),
         )
         return [dict(row) for row in cur]
 
@@ -261,15 +423,16 @@ def list_stores() -> List[Dict[str, Any]]:
 def get_store(store_id: int) -> Optional[Dict[str, Any]]:
     with get_db() as conn:
         row = conn.execute(
-            "SELECT id, name FROM stores WHERE id = ?", (store_id,)
+            "SELECT id, name, group_id FROM stores WHERE id = ?", (store_id,)
         ).fetchone()
         return dict(row) if row else None
 
 
-def create_store(name: str) -> int:
+def create_store(name: str, group_id: int) -> int:
     with get_db() as conn:
         cur = conn.execute(
-            "INSERT INTO stores (name, created_at) VALUES (?, ?)", (name, _now())
+            "INSERT INTO stores (group_id, name, created_at) VALUES (?, ?, ?)",
+            (group_id, name, _now()),
         )
         return int(cur.lastrowid)
 

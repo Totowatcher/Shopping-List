@@ -68,10 +68,19 @@ class CreateUserRequest(BaseModel):
     username: str
     password: str
     role: str = "user"
+    group_id: Optional[int] = None
 
 
 class PasswordRequest(BaseModel):
     password: str
+
+
+class SetUserGroupRequest(BaseModel):
+    group_id: int
+
+
+class GroupRequest(BaseModel):
+    name: str
 
 
 class StoreRequest(BaseModel):
@@ -95,7 +104,6 @@ class UpdateItemRequest(BaseModel):
     note: Optional[str] = None
     checked: Optional[bool] = None
     category_id: Optional[int] = None
-    # When True, category_id was explicitly sent (including null to clear)
     clear_category: bool = False
 
 
@@ -105,6 +113,47 @@ class ReorderRequest(BaseModel):
 
 class ReorderCategoriesRequest(BaseModel):
     category_ids: List[int]
+
+
+# ---------------------------------------------------------------------------
+# Access helpers
+# ---------------------------------------------------------------------------
+
+def _db_user(token_user: Dict[str, Any]) -> Dict[str, Any]:
+    user = db.get_user_by_username(token_user["username"])
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    if not user.get("group_id"):
+        raise HTTPException(
+            status_code=403,
+            detail="Your account is not assigned to a group. Ask an admin.",
+        )
+    return user
+
+
+def _require_store(store_id: int, token_user: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the store if it belongs to the caller's group."""
+    user = _db_user(token_user)
+    store = db.get_store(store_id)
+    if not store or store["group_id"] != user["group_id"]:
+        raise HTTPException(status_code=404, detail="Store not found")
+    return store
+
+
+def _require_item(item_id: int, token_user: Dict[str, Any]) -> Dict[str, Any]:
+    item = db.get_item(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+    _require_store(item["store_id"], token_user)
+    return item
+
+
+def _require_category(category_id: int, token_user: Dict[str, Any]) -> Dict[str, Any]:
+    cat = db.get_category(category_id)
+    if not cat:
+        raise HTTPException(status_code=404, detail="Category not found")
+    _require_store(cat["store_id"], token_user)
+    return cat
 
 
 # ---------------------------------------------------------------------------
@@ -127,12 +176,22 @@ async def login(body: LoginRequest):
         "token_type": "bearer",
         "username": user["username"],
         "role": user["role"],
+        "group_id": user.get("group_id"),
+        "group_name": user.get("group_name"),
     }
 
 
 @app.get("/api/auth/me")
 async def auth_me(user: Dict[str, Any] = Depends(require_user)):
-    return user
+    db_user = db.get_user_by_username(user["username"])
+    if not db_user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return {
+        "username": db_user["username"],
+        "role": db_user["role"],
+        "group_id": db_user.get("group_id"),
+        "group_name": db_user.get("group_name"),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -141,16 +200,18 @@ async def auth_me(user: Dict[str, Any] = Depends(require_user)):
 
 @app.get("/api/stores")
 async def get_stores(user: Dict[str, Any] = Depends(require_user)):
-    return {"stores": db.list_stores()}
+    db_user = _db_user(user)
+    return {"stores": db.list_stores(db_user["group_id"])}
 
 
 @app.post("/api/stores", status_code=201)
 async def add_store(body: StoreRequest, user: Dict[str, Any] = Depends(require_user)):
+    db_user = _db_user(user)
     name = body.name.strip()
     if not name:
         raise HTTPException(status_code=422, detail="Store name required")
     try:
-        store_id = db.create_store(name)
+        store_id = db.create_store(name, db_user["group_id"])
     except Exception:
         raise HTTPException(status_code=409, detail=f'A store named "{name}" already exists')
     return {"id": store_id, "name": name}
@@ -160,14 +221,12 @@ async def add_store(body: StoreRequest, user: Dict[str, Any] = Depends(require_u
 async def update_store(
     store_id: int, body: StoreRequest, user: Dict[str, Any] = Depends(require_user)
 ):
+    _require_store(store_id, user)
     name = body.name.strip()
     if not name:
         raise HTTPException(status_code=422, detail="Store name required")
     try:
-        if not db.rename_store(store_id, name):
-            raise HTTPException(status_code=404, detail="Store not found")
-    except HTTPException:
-        raise
+        db.rename_store(store_id, name)
     except Exception:
         raise HTTPException(status_code=409, detail=f'A store named "{name}" already exists')
     return {"id": store_id, "name": name}
@@ -175,8 +234,8 @@ async def update_store(
 
 @app.delete("/api/stores/{store_id}")
 async def remove_store(store_id: int, user: Dict[str, Any] = Depends(require_user)):
-    if not db.delete_store(store_id):
-        raise HTTPException(status_code=404, detail="Store not found")
+    _require_store(store_id, user)
+    db.delete_store(store_id)
     return {"ok": True}
 
 
@@ -186,8 +245,7 @@ async def remove_store(store_id: int, user: Dict[str, Any] = Depends(require_use
 
 @app.get("/api/stores/{store_id}/categories")
 async def get_categories(store_id: int, user: Dict[str, Any] = Depends(require_user)):
-    if not db.get_store(store_id):
-        raise HTTPException(status_code=404, detail="Store not found")
+    _require_store(store_id, user)
     return {"categories": db.list_categories(store_id)}
 
 
@@ -195,8 +253,7 @@ async def get_categories(store_id: int, user: Dict[str, Any] = Depends(require_u
 async def add_category(
     store_id: int, body: CategoryRequest, user: Dict[str, Any] = Depends(require_user)
 ):
-    if not db.get_store(store_id):
-        raise HTTPException(status_code=404, detail="Store not found")
+    _require_store(store_id, user)
     name = body.name.strip()
     if not name:
         raise HTTPException(status_code=422, detail="Category name required")
@@ -211,9 +268,7 @@ async def add_category(
 async def update_category(
     category_id: int, body: CategoryRequest, user: Dict[str, Any] = Depends(require_user)
 ):
-    cat = db.get_category(category_id)
-    if not cat:
-        raise HTTPException(status_code=404, detail="Category not found")
+    _require_category(category_id, user)
     name = body.name.strip()
     if not name:
         raise HTTPException(status_code=422, detail="Category name required")
@@ -228,8 +283,8 @@ async def update_category(
 async def remove_category(
     category_id: int, user: Dict[str, Any] = Depends(require_user)
 ):
-    if not db.delete_category(category_id):
-        raise HTTPException(status_code=404, detail="Category not found")
+    _require_category(category_id, user)
+    db.delete_category(category_id)
     return {"ok": True}
 
 
@@ -239,8 +294,7 @@ async def reorder_categories(
     body: ReorderCategoriesRequest,
     user: Dict[str, Any] = Depends(require_user),
 ):
-    if not db.get_store(store_id):
-        raise HTTPException(status_code=404, detail="Store not found")
+    _require_store(store_id, user)
     db.reorder_categories(store_id, body.category_ids)
     return {"ok": True}
 
@@ -249,8 +303,7 @@ async def reorder_categories(
 async def add_grocery_defaults(
     store_id: int, user: Dict[str, Any] = Depends(require_user)
 ):
-    if not db.get_store(store_id):
-        raise HTTPException(status_code=404, detail="Store not found")
+    _require_store(store_id, user)
     if db.list_categories(store_id):
         raise HTTPException(
             status_code=409,
@@ -265,8 +318,7 @@ async def suggest_category(
     name: str = Query(""),
     user: Dict[str, Any] = Depends(require_user),
 ):
-    if not db.get_store(store_id):
-        raise HTTPException(status_code=404, detail="Store not found")
+    _require_store(store_id, user)
     suggested = db.suggest_category(store_id, name)
     return {"category_id": suggested}
 
@@ -285,9 +337,7 @@ def _validate_category_for_store(store_id: int, category_id: Optional[int]) -> N
 
 @app.get("/api/stores/{store_id}/items")
 async def get_items(store_id: int, user: Dict[str, Any] = Depends(require_user)):
-    store = db.get_store(store_id)
-    if not store:
-        raise HTTPException(status_code=404, detail="Store not found")
+    store = _require_store(store_id, user)
     return {
         "store": store,
         "items": db.list_items(store_id),
@@ -299,8 +349,7 @@ async def get_items(store_id: int, user: Dict[str, Any] = Depends(require_user))
 async def add_item(
     store_id: int, body: CreateItemRequest, user: Dict[str, Any] = Depends(require_user)
 ):
-    if not db.get_store(store_id):
-        raise HTTPException(status_code=404, detail="Store not found")
+    _require_store(store_id, user)
     name = body.name.strip()
     if not name:
         raise HTTPException(status_code=422, detail="Item name required")
@@ -320,13 +369,10 @@ async def add_item(
 async def patch_item(
     item_id: int, body: UpdateItemRequest, user: Dict[str, Any] = Depends(require_user)
 ):
-    item = db.get_item(item_id)
-    if not item:
-        raise HTTPException(status_code=404, detail="Item not found")
+    item = _require_item(item_id, user)
     if body.name is not None and not body.name.strip():
         raise HTTPException(status_code=422, detail="Item name cannot be empty")
 
-    # Detect whether category_id was in the JSON (Pydantic v2: model_fields_set)
     fields_set = getattr(body, "model_fields_set", None) or getattr(body, "__fields_set__", set())
     category_arg: Any = ...
     if "category_id" in fields_set or body.clear_category:
@@ -346,8 +392,8 @@ async def patch_item(
 
 @app.delete("/api/items/{item_id}")
 async def remove_item(item_id: int, user: Dict[str, Any] = Depends(require_user)):
-    if not db.delete_item(item_id):
-        raise HTTPException(status_code=404, detail="Item not found")
+    _require_item(item_id, user)
+    db.delete_item(item_id)
     return {"ok": True}
 
 
@@ -355,23 +401,69 @@ async def remove_item(item_id: int, user: Dict[str, Any] = Depends(require_user)
 async def reorder(
     store_id: int, body: ReorderRequest, user: Dict[str, Any] = Depends(require_user)
 ):
-    if not db.get_store(store_id):
-        raise HTTPException(status_code=404, detail="Store not found")
+    _require_store(store_id, user)
     db.reorder_items(store_id, body.item_ids)
     return {"ok": True}
 
 
 @app.post("/api/stores/{store_id}/clear-checked")
 async def clear_checked(store_id: int, user: Dict[str, Any] = Depends(require_user)):
-    if not db.get_store(store_id):
-        raise HTTPException(status_code=404, detail="Store not found")
+    _require_store(store_id, user)
     removed = db.clear_checked_items(store_id)
     return {"removed": removed}
 
 
 # ---------------------------------------------------------------------------
-# Admin: user management
+# Admin: groups & users
 # ---------------------------------------------------------------------------
+
+@app.get("/api/admin/groups")
+async def admin_list_groups(admin: Dict[str, Any] = Depends(require_admin)):
+    return {"groups": db.list_groups()}
+
+
+@app.post("/api/admin/groups", status_code=201)
+async def admin_create_group(
+    body: GroupRequest, admin: Dict[str, Any] = Depends(require_admin)
+):
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Group name required")
+    try:
+        group_id = db.create_group(name)
+    except Exception:
+        raise HTTPException(status_code=409, detail=f'A group named "{name}" already exists')
+    return {"id": group_id, "name": name}
+
+
+@app.put("/api/admin/groups/{group_id}")
+async def admin_rename_group(
+    group_id: int, body: GroupRequest, admin: Dict[str, Any] = Depends(require_admin)
+):
+    if not db.get_group(group_id):
+        raise HTTPException(status_code=404, detail="Group not found")
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Group name required")
+    try:
+        db.rename_group(group_id, name)
+    except Exception:
+        raise HTTPException(status_code=409, detail=f'A group named "{name}" already exists')
+    return {"id": group_id, "name": name}
+
+
+@app.delete("/api/admin/groups/{group_id}")
+async def admin_delete_group(
+    group_id: int, admin: Dict[str, Any] = Depends(require_admin)
+):
+    if not db.get_group(group_id):
+        raise HTTPException(status_code=404, detail="Group not found")
+    try:
+        db.delete_group(group_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True}
+
 
 @app.get("/api/admin/users")
 async def admin_list_users(admin: Dict[str, Any] = Depends(require_admin)):
@@ -391,8 +483,25 @@ async def admin_create_user(
         raise HTTPException(status_code=422, detail="Role must be 'admin' or 'user'")
     if db.get_user_by_username(username):
         raise HTTPException(status_code=409, detail=f'User "{username}" already exists')
-    db.insert_user(username, hash_password(body.password), body.role)
-    return {"username": username, "role": body.role}
+    group_id = body.group_id
+    if group_id is None:
+        group_id = db.default_group_id()
+    elif not db.get_group(group_id):
+        raise HTTPException(status_code=422, detail="Invalid group")
+    db.insert_user(username, hash_password(body.password), body.role, group_id)
+    return {"username": username, "role": body.role, "group_id": group_id}
+
+
+@app.put("/api/admin/users/{username}/group")
+async def admin_set_user_group(
+    username: str, body: SetUserGroupRequest, admin: Dict[str, Any] = Depends(require_admin)
+):
+    if not db.get_user_by_username(username):
+        raise HTTPException(status_code=404, detail="User not found")
+    if not db.get_group(body.group_id):
+        raise HTTPException(status_code=422, detail="Invalid group")
+    db.set_user_group(username, body.group_id)
+    return {"ok": True, "username": username, "group_id": body.group_id}
 
 
 @app.delete("/api/admin/users/{username}")
